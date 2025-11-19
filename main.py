@@ -1,7 +1,6 @@
 import time
 import json
 import hashlib
-import hmac
 import requests
 from urllib.parse import urlencode
 
@@ -10,13 +9,13 @@ from urllib.parse import urlencode
 # ==============================
 API_KEY = "api_89xljyng6fbsyrl5a4rz5ek0cl162qvd"
 API_SECRET = "sec_5133785265790364470609218657"
-ACCOUNT_ID = "145257"   # ← это твой accountId, он виден в DevTools
+ACCOUNT_ID = "145257"
 
 BASE_URL = "https://api.workiz.com/api/v2/jobs"
 
 
 # ==============================
-# 🔐 Signature generator
+# 🔐 Generate Signature
 # ==============================
 def generate_signature():
     timestamp = str(int(time.time()))
@@ -26,10 +25,10 @@ def generate_signature():
 
 
 # ==============================
-# 📥 Fetch all jobs (with logging)
+# 📥 Fetch jobs (with forced raw logging)
 # ==============================
 def fetch_all_jobs(limit=1000):
-    print("📡 Fetching jobs from Workiz...")
+    print("📡 Fetching jobs...")
 
     timestamp, signature = generate_signature()
 
@@ -41,36 +40,39 @@ def fetch_all_jobs(limit=1000):
     }
 
     url = f"{BASE_URL}?{urlencode(params)}"
-    print(f"➡️ Request URL: {url}")
+    print(f"\n➡️ REQUEST URL:\n{url}\n")
 
     response = requests.get(url)
 
-    print(f"➡️ HTTP Status: {response.status_code}")
+    print(f"➡️ HTTP STATUS: {response.status_code}")
 
-    # Если Workiz вернул не JSON — покажем сырой ответ
+    # ==============================
+    # 🔥 ВАЖНО: Печать сырого ответа ВСЕГДА
+    # ==============================
+    raw = response.text
+    print("\n🔍 RAW RESPONSE (first 4000 chars):\n")
+    print(raw[:4000])
+    print("\n🔍 END OF RAW RESPONSE\n")
+
+    # Теперь пробуем JSON
     try:
         data = response.json()
-    except Exception:
-        print("\n❌ ERROR: Workiz returned NON-JSON response!")
-        print("Raw response below (first 2000 chars):\n")
-        print(response.text[:2000])
+        return data
+    except Exception as e:
+        print("\n❌ JSON PARSE ERROR:", e)
         raise
-
-    return data
 
 
 # ==============================
 # 🚀 MAIN
 # ==============================
 def main():
-    print("🚀 Запуск Workiz Analytics Engine…")
-    print("🔍 Получаем все работы из Workiz…")
+    print("\n🚀 Starting Workiz Sync Engine")
+    print("🔍 Trying to load jobs...\n")
 
     jobs = fetch_all_jobs()
 
-    print(f"✅ Загружено работ: {len(jobs.get('data', []))}")
-
-    # Если хочешь — позже добавим сохранение в файл/Google Sheets
+    print(f"\n✅ Success. Jobs loaded: {len(jobs.get('data', []))}\n")
 
 
 if __name__ == "__main__":
