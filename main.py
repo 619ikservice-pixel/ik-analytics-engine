@@ -1,81 +1,192 @@
 import requests
-import json
-import gspread
+import time
+import hashlib
+import hmac
+import csv
+import math
 
-# ==============================
-# CONFIG
-# ==============================
+API_KEY = "api_89xljyng6fbsyrl5a4rz5ek0cl162qvd"
+API_SECRET = "sec_5133785265790364470609218657"
 
-WORKIZ_API_KEY = "api_89xljyng6fbsyrl5a4rz5ek0cl162qvd"
-GOOGLE_SHEET_NAME = "IKSHEET"
+GRAPHQL_URL = "https://app.workiz.com/graphql"
 
-# ==============================
-# GOOGLE CLIENT
-# ==============================
+# -----------------------------
+# Подпись Workiz
+# -----------------------------
+def make_signature():
+    timestamp = str(int(time.time()))
+    message = f"{API_KEY}{timestamp}"
 
-def load_gspread_client():
-    try:
-        gc = gspread.service_account(filename="key.json")
-        return gc
-    except Exception as e:
-        print("ERROR LOADING GOOGLE CLIENT:", e)
-        raise
+    signature = hmac.new(
+        API_SECRET.encode(),
+        message.encode(),
+        hashlib.sha256
+    ).hexdigest()
 
-# ==============================
-# FETCH JOBS FROM WORKIZ
-# ==============================
+    return timestamp, signature
 
-def fetch_all_jobs():
 
-    url = "https://api.workiz.com/api/v2/jobs?limit=1000"
+# -----------------------------
+# Запрос к Workiz GraphQL
+# -----------------------------
+def gql_request(query, variables):
+    timestamp, signature = make_signature()
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {WORKIZ_API_KEY}"
+        "x-api-key": API_KEY,
+        "x-api-timestamp": timestamp,
+        "x-api-signature": signature,
     }
 
-    print("\n=== Fetching Workiz jobs (diagnostic mode) ===")
-    response = requests.get(url, headers=headers)
+    payload = {
+        "operationName": "jobs-list-to-sql",
+        "variables": variables,
+        "query": query
+    }
 
-    # Diagnostic output
-    print("\n--- RAW RESPONSE ---")
-    print("STATUS:", response.status_code)
-    print("BODY:")
-    print(response.text)
-    print("--- END RAW RESPONSE ---\n")
+    response = requests.post(GRAPHQL_URL, headers=headers, json=payload)
 
-    # Try convert to JSON
-    try:
-        data = response.json()
-        return data
-    except Exception as e:
-        print("\nERROR: Could not parse JSON from Workiz response")
-        print("Most likely wrong permissions or incorrect API endpoint.")
-        raise
+    if response.status_code == 429:
+        print("⚠️ RATE LIMIT — ждём 5 секунд…")
+        time.sleep(5)
+        return gql_request(query, variables)
 
-# ==============================
+    if response.status_code != 200:
+        raise Exception(f"GraphQL Error {response.status_code}: {response.text}")
+
+    return response.json()
+
+
+# -----------------------------
+# Основной запрос Workiz
+# -----------------------------
+QUERY = """
+query jobs_list_to_sql($limit:Int!, $offset:Int!, $filters:JobsFilterInput) {
+  jobs(limit:$limit, offset:$offset, filters:$filters) {
+    id
+    status
+    jobType
+    scheduledAt
+    createdAt
+    updatedAt
+    technician {
+      fullName
+    }
+    client {
+      name
+      phone
+    }
+    address {
+      street
+      city
+      state
+      zipcode
+    }
+    financial {
+      total
+      subtotal
+      tax
+    }
+  }
+}
+"""
+
+
+# -----------------------------
+# Выгрузка всех работ
+# -----------------------------
+def fetch_all_jobs(limit=500):
+    print("🔍 Получаем общее количество работ...")
+
+    # Запрос первой страницы чтобы узнать total
+    first_page = gql_request(QUERY, {
+        "limit": 1,
+        "offset": 0,
+        "filters": {}
+    })
+
+    # Workiz не отдаёт total, поэтому считаем по факту
+    # Делаем safe fallback: качаем, пока не придёт пусто
+
+    all_jobs = []
+    offset = 0
+
+    while True:
+        print(f"⏳ Загружаем offset={offset} ...")
+
+        data = gql_request(QUERY, {
+            "limit": limit,
+            "offset": offset,
+            "filters": {}
+        })
+
+        page = data.get("data", {}).get("jobs", [])
+
+        if not page:
+            print("✅ Дальше пусто — выгрузка завершена")
+            break
+
+        all_jobs.extend(page)
+        offset += limit
+
+        print(f"📦 Загружено: {len(all_jobs)}")
+
+        time.sleep(0.5)
+
+    print(f"\n🎉 ИТОГО загружено работ: {len(all_jobs)}")
+    return all_jobs
+
+
+# -----------------------------
+# Сохранение CSV
+# -----------------------------
+def save_csv(jobs, filename="jobs_2025.csv"):
+    print(f"💾 Сохраняем файл {filename} ...")
+
+    with open(filename, "w", newline='', encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        writer.writerow([
+            "Job ID", "Status", "Job Type",
+            "Technician", "Client Name", "Client Phone",
+            "Street", "City", "State", "Zip",
+            "Scheduled At", "Created At", "Updated At",
+            "Total", "Subtotal", "Tax"
+        ])
+
+        for j in jobs:
+            writer.writerow([
+                j.get("id"),
+                j.get("status"),
+                j.get("jobType"),
+                j.get("technician", {}).get("fullName"),
+                j.get("client", {}).get("name"),
+                j.get("client", {}).get("phone"),
+                j.get("address", {}).get("street"),
+                j.get("address", {}).get("city"),
+                j.get("address", {}).get("state"),
+                j.get("address", {}).get("zipcode"),
+                j.get("scheduledAt"),
+                j.get("createdAt"),
+                j.get("updatedAt"),
+                j.get("financial", {}).get("total"),
+                j.get("financial", {}).get("subtotal"),
+                j.get("financial", {}).get("tax"),
+            ])
+
+    print("✅ CSV сохранён")
+
+
+# -----------------------------
 # MAIN
-# ==============================
-
+# -----------------------------
 def main():
-    print("=== IK Analytics Engine: Start sync ===")
+    print("\n🚀 Запуск Workiz Analytics Engine...")
+    jobs = fetch_all_jobs(limit=300)   # можно 1000, но 300 стабильнее
+    save_csv(jobs)
+    print("\n🎉 ГОТОВО.\n")
 
-    # 1. Load Google Sheets
-    gc = load_gspread_client()
-
-    # 2. Open Google Sheet
-    try:
-        sh = gc.open(GOOGLE_SHEET_NAME)
-    except Exception as e:
-        print("ERROR OPENING GOOGLE SHEET:", e)
-        raise
-
-    # 3. Fetch jobs (diagnostic only)
-    jobs_raw = fetch_all_jobs()
-
-    print("\n=== Parsed JSON structure ===")
-    print(json.dumps(jobs_raw, indent=2)[:2000])  # preview
-    print("\nSync COMPLETE (diagnostic mode).")
 
 if __name__ == "__main__":
     main()
