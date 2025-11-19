@@ -1,101 +1,159 @@
-import json
 import gspread
 import requests
+from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
+# -------------------------------
+# CONFIG
+# -------------------------------
 
-# =========================
-#  CONFIG
-# =========================
+WORKIZ_API_KEY = "${{ secrets.WORKIZ_API_KEY }}"        # API key из GitHub secrets
+WORKIZ_API_URL = "https://api.workiz.com/api/v1/jobs"
 
-SHEET_NAME = "IKSHEET"   # <— ОБНОВЛЁННОЕ ИМЯ ГУГЛ-ТАБЛИЦЫ
-JOBS_SHEET = "Jobs"
-HEALTHCHECK_SHEET = "healthcheck"
+GOOGLE_KEY_FILE = "key.json"                            # Google service file
+SPREADSHEET_NAME = "IKSHEET"                            # Название Google Sheet
 
-WORKIZ_API_KEY = "YOUR_WORKIZ_API_KEY"  # Если нет — оставь пустым
-WORKIZ_URL = "https://api.workiz.com/api/v1/jobs"
+# Вкладки по годам
+YEAR_SHEETS = ["2025", "2026", "2027", "2028"]
 
+# Поля, которые пишем в таблицу
+FIELDS = [
+    "job_id", "title", "status", "technician", "created",
+    "scheduled", "completed", "customer_name", "customer_phone",
+    "total", "balance", "source", "updated_at", "appliance_type"
+]
 
-# =========================
-#  GOOGLE CLIENT
-# =========================
+# -------------------------------
+# GOOGLE AUTH
+# -------------------------------
 
 def load_gspread_client():
-    """Loads service account credentials from key.json file in repo."""
-    with open("key.json", "r") as f:
-        creds = json.load(f)
-    return gspread.service_account_from_dict(creds)
+    scope = ["https://spreadsheets.google.com/feeds",
+             "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_KEY_FILE, scope)
+    return gspread.authorize(creds)
 
+# -------------------------------
+# WORKIZ API — выгрузка всех работ
+# -------------------------------
 
-# =========================
-#  WRITE JOBS TO SHEET
-# =========================
+def fetch_all_jobs():
+    print("Fetching Workiz jobs...")
 
-def write_jobs_to_sheet(gc):
-    """Writes job list into the Jobs sheet."""
-    print("=== Writing jobs to sheet ===")
+    all_jobs = []
+    page = 1
 
-    sh = gc.open(SHEET_NAME)
-    ws = sh.worksheet(JOBS_SHEET)
+    while True:
+        params = {
+            "api_key": WORKIZ_API_KEY,
+            "page": page,
+            "per_page": 200   # максимум Workiz
+        }
 
-    # Заголовки
-    header = ["job_id", "title", "status", "technician", "created", "scheduled"]
-    ws.clear()
-    ws.append_row(header)
+        response = requests.get(WORKIZ_API_URL, params=params)
+        data = response.json()
 
-    # Если Workiz API нет — заполним тестовыми строками, чтобы убедиться что запись работает
-    fake_jobs = [
-        ["12345", "Dryer not heating", "Completed", "Dennis", "2025-10-01", "2025-10-01"],
-        ["12346", "Oven not working", "Scheduled", "Oleg", "2025-10-02", "2025-10-05"]
+        jobs = data.get("jobs", [])
+        if not jobs:
+            break
+
+        all_jobs.extend(jobs)
+        print(f"Loaded page {page} ({len(jobs)} jobs)")
+
+        page += 1
+
+    print(f"Total jobs fetched: {len(all_jobs)}")
+    return all_jobs
+
+# -------------------------------
+# ПРЕОБРАЗОВАНИЕ ДАТ
+# -------------------------------
+
+def safe_date(value):
+    """Convert date or return empty string."""
+    if not value:
+        return ""
+    try:
+        return value.split("T")[0]
+    except:
+        return ""
+
+# -------------------------------
+# ПОДГОТОВКА ДАННЫХ ДЛЯ ГОДА
+# -------------------------------
+
+def convert_job(job):
+    """Convert raw Workiz job to row for Google Sheets."""
+    return [
+        job.get("_id", ""),
+        job.get("title", ""),
+        job.get("status", ""),
+        job.get("assignedTech", {}).get("fullName", ""),
+        safe_date(job.get("createdAt")),
+        safe_date(job.get("scheduledFor")),
+        safe_date(job.get("completedAt")),
+        job.get("client", {}).get("fullName", ""),
+        job.get("client", {}).get("phone", ""),
+        job.get("total", ""),
+        job.get("balance", ""),
+        job.get("source", ""),
+        safe_date(job.get("updatedAt")),
+        job.get("appliance", job.get("category", ""))  # appliance_type fallback
     ]
 
-    for row in fake_jobs:
-        ws.append_row(row)
+# -------------------------------
+# ЗАПИСЬ В GOOGLE SHEETS
+# -------------------------------
 
-    print("Jobs sheet updated successfully.")
+def write_jobs_to_sheets(gc, jobs):
+    print("Writing jobs to sheets...")
 
+    sh = gc.open(SPREADSHEET_NAME)
 
-# =========================
-#  HEALTHCHECK
-# =========================
+    # Подготовка данных по годам
+    year_rows = {year: [] for year in YEAR_SHEETS}
 
-def write_healthcheck(gc):
-    """Writes timestamp into healthcheck sheet to confirm sync worked."""
-    print("=== Writing healthcheck ===")
+    for job in jobs:
+        created = job.get("createdAt")
+        if not created:
+            continue
 
-    sh = gc.open(SHEET_NAME)
-    ws = sh.worksheet(HEALTHCHECK_SHEET)
+        year = created[:4]
 
-    ws.clear()
-    ws.append_row(["last_sync", datetime.utcnow().isoformat() + "Z"])
+        if year in year_rows:
+            row = convert_job(job)
+            year_rows[year].append(row)
 
-    print("Healthcheck updated.")
+    # Запись по годам
+    for year in YEAR_SHEETS:
+        ws = sh.worksheet(year)
 
+        # очищаем перед записью (кроме заголовков)
+        ws.resize(1)
 
-# =========================
-#  MAIN
-# =========================
+        rows = year_rows[year]
+        if rows:
+            ws.append_rows(rows, value_input_option="RAW")
+
+        print(f"{year}: {len(rows)} jobs written")
+
+# -------------------------------
+# MAIN
+# -------------------------------
 
 def main():
-    print("=== IK Analytics Engine: start job sync ===")
+    print("=== IK Analytics Engine: START ===")
 
-    try:
-        gc = load_gspread_client()
-        print("Google client loaded successfully.")
-    except Exception as e:
-        print("ERROR loading Google client:", e)
-        raise
+    # Google Sheets auth
+    gc = load_gspread_client()
 
-    try:
-        write_jobs_to_sheet(gc)
-        write_healthcheck(gc)
-    except Exception as e:
-        print("ERROR during sync:", e)
-        raise
+    # Fetch jobs from Workiz
+    jobs = fetch_all_jobs()
 
-    print("=== Sync completed ===")
+    # Write jobs into year sheets
+    write_jobs_to_sheets(gc, jobs)
 
+    print("=== IK Analytics Engine: DONE ===")
 
 if __name__ == "__main__":
     main()
-
