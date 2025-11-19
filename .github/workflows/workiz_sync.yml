@@ -1,17 +1,16 @@
-name: Workiz Sync Engine
+name: sync
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
 
 jobs:
-  sync:
+  run:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+    - uses: actions/checkout@v3
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -22,10 +21,9 @@ jobs:
       run: |
         pip install gspread oauth2client requests
 
-    - name: Run sync script
-      env:
-        WORKIZ_API_KEY: ${{ secrets.WORKIZ_API_KEY }}
-        WORKIZ_API_SECRET: ${{ secrets.WORKIZ_API_SECRET }}
-        GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+    - name: Create key.json
       run: |
-        python3 main.py
+        echo '${{ secrets.GOOGLE_SERVICE_KEY }}' > key.json
+
+    - name: Run sync script
+      run: python3 main.py
